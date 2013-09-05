@@ -1,0 +1,2 @@
+version=3
+https://github.com/stackforge/pyghmi/tags /stackforge/pyghmi/archive/(.*).tar.gz

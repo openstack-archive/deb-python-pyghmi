@@ -1,0 +1,5 @@
+python-pyghmi (0.5.0-1) unstable; urgency=low
+
+  * Initial release. (Closes: #721907)
+
+ -- Thomas Goirand <zigo@debian.org>  Thu, 05 Sep 2013 17:40:23 +0800
