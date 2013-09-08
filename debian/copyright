@@ -8,7 +8,8 @@ Copyright: (c) 2013, Thomas Goirand <zigo@debian.org>
 License: Apache-2
 
 Files: *
-Copyright: (c) 2013, Jarrod Johnson <jbjohnso@us.ibm.com>
+Copyright: (c) 2013, IBM Corporation
+           (c) 2013, Jarrod Johnson <jbjohnso@us.ibm.com>
            (c) 2013, Monty Taylor <mordred@inaugust.com>
            (c) 2013, Devananda van der Veen <devananda.vdv@gmail.com>
 License: Apache-2
