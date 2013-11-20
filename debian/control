@@ -20,8 +20,8 @@ Build-Depends-Indep: python-coverage,
                      python-testtools,
                      testrepository (>=0.0.13)
 Standards-Version: 3.9.4
-Vcs-Browser: http://anonscm.debian.org/gitweb/?p=openstack/python-pyghmi.git
-Vcs-Git: git://anonscm.debian.org/openstack/python-pyghmi.git
+Vcs-Browser: http://git.gplhost.com/gitweb/?p=openstack/python-pyghmi.git
+Vcs-Git: http://git.gplhost.com/openstack/python-pyghmi.git
 Homepage: https://github.com/stackforge/pyghmi
 
 Package: python-pyghmi
