@@ -29,6 +29,7 @@ from Crypto.Cipher import AES
 from Crypto.Hash import HMAC
 from Crypto.Hash import SHA
 
+import pyghmi.exceptions as exc
 from pyghmi.ipmi.private import constants
 
 
@@ -51,6 +52,11 @@ def _monotonic_time():
     else:  # last resort, non monotonic time
         return time.time()
     #TODO(jbjohnso): Windows variant
+
+
+def _poller(readhandles, timeout=0):
+    rdylist, _, _ = select.select(readhandles, (), (), timeout)
+    return rdylist
 
 
 def _aespad(data):
@@ -99,7 +105,7 @@ def get_ipmi_error(response, suffix=""):
     elif code in constants.ipmi_completion_codes:
         res = constants.ipmi_completion_codes[code] + suffix
     else:
-        res = "Unknown code " + code + " encountered"
+        res = "Unknown code 0x%2x encountered" % code
     return res
 
 
@@ -124,8 +130,6 @@ class Session:
     :param port: UDP port to communicate with, pretty much always 623
     :param onlogon: callback to receive notification of login completion
     """
-    poller = select.poll()
-    ipmipoller = select.poll()
     _external_handlers = {}
     bmc_handlers = {}
     waiting_sessions = {}
@@ -160,9 +164,7 @@ class Session:
             pass
 
         curmax = cls.socket.getsockopt(socket.SOL_SOCKET, socket.SO_RCVBUF)
-        cls.poller.register(cls.socket, select.POLLIN)
         cls.readersockets = [cls.socket]
-        cls.ipmipoller.register(cls.socket, select.POLLIN)
         curmax = curmax / 2
         # we throttle such that we never have no more outstanding packets than
         # our receive buffer should be able to handle
@@ -183,7 +185,7 @@ class Session:
         a client-provided callback.
         """
         if 'error' in response:
-            raise Exception(response['error'])
+            raise exc.IpmiException(response['error'])
 
     def __init__(self,
                  bmc,
@@ -323,7 +325,7 @@ class Session:
         else:  # if not retry, give it a second before surrending
             timeout = 1
         #In the synchronous case, wrap the event loop in this call
-        #The event loop is shared amongst python-ipmi session instances
+        #The event loop is shared amongst pyghmi session instances
         #within a process.  In this way, synchronous usage of the interface
         #plays well with asynchronous use.  In fact, this produces the behavior
         #of only the constructor *really* needing a callback.  From then on,
@@ -369,9 +371,11 @@ class Session:
         if (self.ipmiversion == 2.0):
             message.append(payload_type)
             if (baretype == 2):
-                raise Exception("TODO(jbjohnso): OEM Payloads")
+                #TODO(jbjohnso): OEM payload types
+                raise NotImplementedError("OEM Payloads")
             elif baretype not in constants.payload_types.values():
-                raise Exception("Unrecognized payload type %d" % baretype)
+                raise NotImplementedError(
+                    "Unrecognized payload type %d" % baretype)
             message += struct.unpack("!4B", struct.pack("<I", self.sessionid))
         message += struct.unpack("!4B", struct.pack("<I", self.sequencenumber))
         if (self.ipmiversion == 1.5):
@@ -447,7 +451,7 @@ class Session:
         password = self.password
         padneeded = 16 - len(password)
         if padneeded < 0:
-            raise Exception("Password is too long for ipmi 1.5")
+            raise exc.IpmiException("Password is too long for ipmi 1.5")
         password += '\x00' * padneeded
         passdata = struct.unpack("16B", password)
         if checkremotecode:
@@ -546,7 +550,8 @@ class Session:
     def _get_session_challenge(self):
         reqdata = [2]
         if len(self.userid) > 16:
-            raise Exception("Username too long for IPMI, must not exceed 16")
+            raise exc.IpmiException(
+                "Username too long for IPMI, must not exceed 16")
         padneeded = 16 - len(self.userid)
         userid = self.userid + ('\x00' * padneeded)
         reqdata += struct.unpack("!16B", userid)
@@ -642,24 +647,27 @@ class Session:
             return 0
         rdylist, _, _ = select.select(cls.readersockets, (), (), timeout)
         if len(rdylist) > 0:
-            while cls.ipmipoller.poll(0):  # if the somewhat lengthy queue
-                        # processing takes long enough for packets to come in,
-                        # be eager
+            while _poller((cls.socket,)):  # if the somewhat lengthy
+                        # queue # processing takes long enough for packets to
+                        # come in, be eager
                 pktqueue = collections.deque([])
-                while cls.ipmipoller.poll(0):  # looks rendundant, but want to
-                              #queue and process packets to keep things off
-                              #RCVBUF
+                while _poller((cls.socket,)):  # looks rendundant, but
+                              # want # to queue and process packets to keep
+                              # things off RCVBUF
                     rdata = cls.socket.recvfrom(3000)
                     pktqueue.append(rdata)
                 while len(pktqueue):
                     (data, sockaddr) = pktqueue.popleft()
                     cls._route_ipmiresponse(sockaddr, data)
-                    while cls.ipmipoller.poll(0):  # seems ridiculous, but
-                        # between every callback, check for packets again
+                    while _poller((cls.socket,)):  # seems ridiculous,
+                         #but between every callback, check for packets again
                         rdata = cls.socket.recvfrom(3000)
                         pktqueue.append(rdata)
-            for handlepair in cls.poller.poll(0):
-                myhandle = handlepair[0]
+            for handlepair in _poller(cls.readersockets):
+                if isinstance(handlepair, int):
+                    myhandle = handlepair
+                else:
+                    myhandle = handlepair.fileno()
                 if myhandle != cls.socket.fileno():
                     myfile = cls._external_handlers[myhandle][1]
                     cls._external_handlers[myhandle][0](myfile)
@@ -700,9 +708,11 @@ class Session:
         :param callback: function to call when input detected on the handle.
                          will receive the handle as an argument
         """
-        cls._external_handlers[handle.fileno()] = (callback, handle)
+        if isinstance(handle, int):
+            cls._external_handlers[handle] = (callback, handle)
+        else:
+            cls._external_handlers[handle.fileno()] = (callback, handle)
         cls.readersockets += [handle]
-        cls.poller.register(handle, select.POLLIN)
 
     @classmethod
     def _route_ipmiresponse(cls, sockaddr, data):
@@ -1074,16 +1084,21 @@ class Session:
             Session.socket.sendto(self.netpacket, self.sockaddr)
         else:  # he have not yet picked a working sockaddr for this connection,
               # try all the candidates that getaddrinfo provides
-            for res in socket.getaddrinfo(self.bmc,
-                                          self.port,
-                                          0,
-                                          socket.SOCK_DGRAM):
-                sockaddr = res[4]
-                if (res[0] == socket.AF_INET):  # convert the sockaddr AF_INET6
-                    newhost = '::ffff:' + sockaddr[0]
-                    sockaddr = (newhost, sockaddr[1], 0, 0)
-                Session.bmc_handlers[sockaddr] = self
-                Session.socket.sendto(self.netpacket, sockaddr)
+            try:
+                for res in socket.getaddrinfo(self.bmc,
+                                              self.port,
+                                              0,
+                                              socket.SOCK_DGRAM):
+                    sockaddr = res[4]
+                    if (res[0] == socket.AF_INET):  # convert the sockaddr
+                                                    # to AF_INET6
+                        newhost = '::ffff:' + sockaddr[0]
+                        sockaddr = (newhost, sockaddr[1], 0, 0)
+                    Session.bmc_handlers[sockaddr] = self
+                    Session.socket.sendto(self.netpacket, sockaddr)
+            except socket.gaierror:
+                raise exc.IpmiException(
+                    "Unable to transmit to specified address")
 
     def logout(self, callback=None, callback_args=None):
         if not self.logged:

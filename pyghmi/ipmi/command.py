@@ -15,6 +15,8 @@
 # limitations under the License.
 # This represents the low layer message framing portion of IPMI
 
+import pyghmi.exceptions as exc
+
 from pyghmi.ipmi.private import session
 
 
@@ -71,7 +73,7 @@ class Command(object):
     :param kg: Optional parameter to use if BMC has a particular Kg configured
     """
 
-    def __init__(self, bmc, userid, password, onlogon=None, kg=None):
+    def __init__(self, bmc, userid, password, port=623, onlogon=None, kg=None):
         # TODO(jbjohnso): accept tuples and lists of each parameter for mass
         # operations without pushing the async complexities up the stack
         self.onlogon = onlogon
@@ -81,11 +83,13 @@ class Command(object):
                                                 userid=userid,
                                                 password=password,
                                                 onlogon=self.logged,
+                                                port=port,
                                                 kg=kg)
         else:
             self.ipmi_session = session.Session(bmc=bmc,
                                                 userid=userid,
                                                 password=password,
+                                                port=port,
                                                 kg=kg)
 
     def logged(self, response):
@@ -95,6 +99,16 @@ class Command(object):
     def eventloop(cls):
         while (session.Session.wait_for_rsp()):
             pass
+
+    @classmethod
+    def wait_for_rsp(cls, timeout):
+        """Delay for no longer than timeout for next response.
+
+        This acts like a sleep that exits on activity.
+
+        :param timeout: Maximum number of seconds before returning
+        """
+        return session.Session.wait_for_rsp(timeout=timeout)
 
     def get_bootdev(self):
         """Get current boot device override information.
@@ -148,11 +162,12 @@ class Command(object):
         :returns: dict -- A dict describing the response retrieved
         """
         if powerstate not in power_states:
-            raise Exception("Unknown power state %s requested" % powerstate)
+            raise exc.InvalidParameterValue(
+                "Unknown power state %s requested" % powerstate)
         self.newpowerstate = powerstate
         response = self.ipmi_session.raw_command(netfn=0, command=1)
         if 'error' in response:
-            raise Exception(response['error'])
+            raise exc.IpmiException(response['error'])
         self.powerstate = 'on' if (response['data'][0] & 1) else 'off'
         if self.powerstate == self.newpowerstate:
             return {'powerstate': self.powerstate}
@@ -161,7 +176,7 @@ class Command(object):
         response = self.ipmi_session.raw_command(
             netfn=0, command=2, data=[power_states[self.newpowerstate]])
         if 'error' in response:
-            raise Exception(response['error'])
+            raise exc.IpmiException(response['error'])
         self.lastresponse = {'pendingpowerstate': self.newpowerstate}
         waitattempts = 300
         if not isinstance(wait, bool):
@@ -181,7 +196,8 @@ class Command(object):
                 currpowerstate = 'on' if (response['data'][0] & 1) else 'off'
                 waitattempts -= 1
             if currpowerstate != self.waitpowerstate:
-                raise Exception("System did not accomplish power state change")
+                raise exc.IpmiException(
+                    "System did not accomplish power state change")
             return {'powerstate': currpowerstate}
         else:
             return self.lastresponse
@@ -256,7 +272,8 @@ class Command(object):
         :param data: Command data as a tuple or list
         :returns: dict -- The response from IPMI device
         """
-        return self.ipmi_session.raw_command(netfn=netfn, command=command)
+        return self.ipmi_session.raw_command(netfn=netfn, command=command,
+                                             data=data)
 
     def get_power(self):
         """Get current power state of the managed system
@@ -268,8 +285,7 @@ class Command(object):
         """
         response = self.ipmi_session.raw_command(netfn=0, command=1)
         if 'error' in response:
-            raise Exception(response['error'])
-            return
+            raise exc.IpmiException(response['error'])
         assert(response['command'] == 1 and response['netfn'] == 1)
         self.powerstate = 'on' if (response['data'][0] & 1) else 'off'
         return {'powerstate': self.powerstate}

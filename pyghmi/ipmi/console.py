@@ -19,7 +19,6 @@
 import fcntl
 import os
 import struct
-import types
 
 from pyghmi.ipmi.private import constants
 from pyghmi.ipmi.private import session
@@ -42,7 +41,7 @@ class Console(object):
 
     #TODO(jbjohnso): still need an exit and a data callin function
     def __init__(self, bmc, userid, password,
-                 iohandler=None,
+                 iohandler, port=623,
                  force=False, kg=None):
         if type(iohandler) == tuple:  # two file handles
             self.console_in = iohandler[0]
@@ -50,12 +49,10 @@ class Console(object):
         elif type(iohandler) == file:  # one full duplex file handle
             self.console_out = iohandler
             self.console_in = iohandler
-        elif isinstance(iohandler, types.FunctionType):
+        elif hasattr(iohandler, '__call__'):
             self.console_out = None
             self.console_in = None
             self.out_handler = iohandler
-        else:
-            raise(Exception('No IO handler provided'))
         if self.console_in is not None:
             fcntl.fcntl(self.console_in.fileno(), fcntl.F_SETFL, os.O_NONBLOCK)
         self.remseq = 0
@@ -71,6 +68,7 @@ class Console(object):
         self.ipmi_session = session.Session(bmc=bmc,
                                             userid=userid,
                                             password=password,
+                                            port=port,
                                             kg=kg,
                                             onlogon=self._got_session)
 
@@ -136,7 +134,8 @@ class Console(object):
         #data[6:7] is the promise of how small packets are going to be, but we
         #don't have any reason to worry about it
         if (data[8] + (data[9] << 8)) != 623:
-            raise Exception("TODO(jbjohnso): support atypical SOL port number")
+            #TODO(jbjohnso): support atypical SOL port number
+            raise NotImplementedError("Non-standard SOL Port Number")
         #ignore data[10:11] for now, the vlan detail, shouldn't matter to this
         #code anyway...
         self.ipmi_session.sol_handler = self._got_sol_payload
@@ -150,6 +149,21 @@ class Console(object):
         self.pendingoutput += handle.read()
         if not self.awaitingack:
             self._sendpendingoutput()
+
+    def send_data(self, data):
+        self.pendingoutput += data
+        if not self.awaitingack:
+            self._sendpendingoutput()
+
+    @classmethod
+    def wait_for_rsp(cls, timeout):
+        """Delay for no longer than timeout for next response.
+
+        This acts like a sleep that exits on activity.
+
+        :param timeout: Maximum number of seconds before returning
+        """
+        return session.Session.wait_for_rsp(timeout=timeout)
 
     def _sendpendingoutput(self):
         self.myseq += 1
@@ -230,6 +244,7 @@ class Console(object):
                 else:  # retry all or part of packet, but in a new form
                     # also add pending output for efficiency and ease
                     newtext = self.lastpayload[4 + ackcount:]
+                    newtext = struct.pack("B"*len(newtext), *newtext)
                     self.pendingoutput = newtext + self.pendingoutput
                     self._sendpendingoutput()
         elif self.awaitingack:  # session marked us as happy, but we are not
