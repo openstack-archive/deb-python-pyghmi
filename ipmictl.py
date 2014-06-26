@@ -57,6 +57,11 @@ def docommand(result, ipmisession):
             print ipmisession.set_bootdev(args[0])
         else:
             print ipmisession.get_bootdev()
+    elif cmmand == 'sensors':
+        for reading in ipmisession.get_sensor_data():
+            print repr(reading)
+    elif cmmand == 'health':
+        print repr(ipmisession.get_health())
     elif cmmand == 'raw':
         print ipmisession.raw_command(netfn=int(args[0]),
                                       command=int(args[1]),
