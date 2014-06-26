@@ -1,6 +1,7 @@
 python-pyghmi (0.6.1-1) unstable; urgency=medium
 
   * New upstream release.
+  * Fixed new build-depends for this release.
 
  -- Thomas Goirand <zigo@debian.org>  Thu, 26 Jun 2014 15:49:24 +0800
 
