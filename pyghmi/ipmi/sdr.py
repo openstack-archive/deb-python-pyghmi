@@ -243,10 +243,11 @@ class SDREntry(object):
     external code to pay attention to this class.
     """
 
-    def __init__(self, entrybytes, reportunsupported=False):
+    def __init__(self, entrybytes, ipmicmd, reportunsupported=False):
         # ignore record id for now, we only care about the sensor number for
         # moment
         self.reportunsupported = reportunsupported
+        self.ipmicmd = ipmicmd
         if entrybytes[2] != 0x51:
             # only recognize '1.5', the only version defined at time of writing
             raise NotImplementedError
@@ -327,10 +328,19 @@ class SDREntry(object):
             # 1: generic threshold based
             # 0x6f: discrete sensor-specific from table 42-3, sensor offsets
             # all others per table 42-2, generic discrete
-        self.numeric_format = (entry[15] & 0b11000000) >> 6
-        # the spec technically reserves numeric_format for compact sensor
-        # numeric, but common treatment won't break currently
+        # numeric format is one of:
         # 0 - unsigned, 1 - 1s complement, 2 - 2s complement, 3 - ignore number
+        # compact records are supposed to always write it as '3', presumably
+        # to allow for the concept of a compact record with a numeric format
+        # even though numerics are not allowed today.  Some implementations
+        # violate the spec and do something other than 3 today.  Tolerate
+        # the violation under the assumption that things are not so hard up
+        # that there will ever be a need for compact sensors supporting numeric
+        # values
+        if self.rectype == 2:
+            self.numeric_format = 3
+        else:
+            self.numeric_format = (entry[15] & 0b11000000) >> 6
         self.sensor_rate = sensor_rates[(entry[15] & 0b111000) >> 3]
         self.unit_mod = ""
         if (entry[15] & 0b110) == 0b10:  # unit1 by unit2
@@ -364,7 +374,7 @@ class SDREntry(object):
             # factors on the fly.
             # the formula could apply if we bother with nominal
             # reading interpretation
-            self.decode_formula(entry)
+            self.decode_formula(entry[19:25])
 
     def _decode_state(self, state):
         mapping = ipmiconst.discrete_type_offsets
@@ -451,55 +461,67 @@ class SDREntry(object):
                 output['states'].append(upper + " non-recoverable threshold")
         return SensorReading(output, self.unit_suffix)
 
+    def _set_tmp_formula(self, value):
+        rsp = self.ipmicmd.raw_command(netfn=4, command=0x23,
+                                       data=(self.sensor_number, value))
+        # skip next reading field, not used in on-demand situation
+        self.decode_formula(rsp['data'][1:])
+
     def decode_value(self, value):
         # Take the input value and return meaningful value
-        if self.linearization == 0x70:  # direct calling code to get factors
-            #TODO(jbjohnso): implement get sensor reading factors support for
-            #non linear sensor
-            raise NotImplementedError("Need to do get sensor reading factors")
+        linearization = self.linearization
+        if linearization > 11:  # direct calling code to get factors
+            # for now, we will get the factors on demand
+            # the facility is engineered such that at construction
+            # time the entire BMC table should be fetchable in a reasonable
+            # fashion.  However for now opt for retrieving rows as needed
+            # rather than tracking all that information for a relatively
+            # rare behavior
+            self._set_tmp_formula(value)
+            linearization = 0
         # time to compute the pre-linearization value.
         decoded = float((value * self.m + self.b) *
                         (10 ** self.resultexponent))
-        if self.linearization == 0:
+        if linearization == 0:
             return decoded
-        elif self.linearization == 1:
+        elif linearization == 1:
             return math.log(decoded)
-        elif self.linearization == 2:
+        elif linearization == 2:
             return math.log(decoded, 10)
-        elif self.linearization == 3:
+        elif linearization == 3:
             return math.log(decoded, 2)
-        elif self.linearization == 4:
+        elif linearization == 4:
             return math.exp(decoded)
-        elif self.linearization == 5:
+        elif linearization == 5:
             return 10 ** decoded
-        elif self.linearization == 6:
+        elif linearization == 6:
             return 2 ** decoded
-        elif self.linearization == 7:
+        elif linearization == 7:
             return 1 / decoded
-        elif self.linearization == 8:
+        elif linearization == 8:
             return decoded ** 2
-        elif self.linearization == 9:
+        elif linearization == 9:
             return decoded ** 3
-        elif self.linearization == 10:
+        elif linearization == 10:
             return math.sqrt(decoded)
-        elif self.linearization == 11:
+        elif linearization == 11:
             return decoded ** (1.0/3)
         else:
             raise NotImplementedError
 
     def decode_formula(self, entry):
         self.m = \
-            twos_complement(entry[19] + ((entry[20] & 0b11000000) << 2), 10)
-        self.tolerance = entry[20] & 0b111111
+            twos_complement(entry[0] + ((entry[1] & 0b11000000) << 2), 10)
+        self.tolerance = entry[1] & 0b111111
         self.b = \
-            twos_complement(entry[21] + ((entry[22] & 0b11000000) << 2), 10)
-        self.accuracy = (entry[22] & 0b111111) + \
-            (entry[23] & 0b11110000) << 2
-        self.accuracyexp = (entry[23] & 0b1100) >> 2
-        self.direction = entry[23] & 0b11
+            twos_complement(entry[2] + ((entry[3] & 0b11000000) << 2), 10)
+        self.accuracy = (entry[3] & 0b111111) + \
+            (entry[4] & 0b11110000) << 2
+        self.accuracyexp = (entry[4] & 0b1100) >> 2
+        self.direction = entry[4] & 0b11
             #0 = n/a, 1 = input, 2 = output
-        self.resultexponent = twos_complement((entry[24] & 0b11110000) >> 4, 4)
-        bexponent = twos_complement(entry[24] & 0b1111, 4)
+        self.resultexponent = twos_complement((entry[5] & 0b11110000) >> 4, 4)
+        bexponent = twos_complement(entry[5] & 0b1111, 4)
         # might as well do the math to 'b' now rather than wait for later
         self.b = self.b * (10**bexponent)
 
@@ -651,7 +673,7 @@ class SDR(object):
         return self.sensors.iterkeys()
 
     def add_sdr(self, sdrbytes):
-        newent = SDREntry(sdrbytes)
+        newent = SDREntry(sdrbytes, self.ipmicmd)
         if newent.sdrtype == TYPE_SENSOR:
             id = newent.sensor_number
             if id in self.sensors:

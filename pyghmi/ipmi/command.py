@@ -142,14 +142,17 @@ class Command(object):
                 (response['data'][1] & 0b1111111) == 5)
         if (response['data'][1] & 0b10000000 or
                 not response['data'][2] & 0b10000000):
-            return {'bootdev': 'default'}
+            return {'bootdev': 'default', 'persistent': True}
         else:  # will consult data2 of the boot flags parameter for the data
+            persistent = False
+            if response['data'][2] & 0b1000000:
+                persistent = True
             bootnum = (response['data'][3] & 0b111100) >> 2
-            bootdev = boot_devices[bootnum]
+            bootdev = boot_devices.get(bootnum)
             if bootdev:
-                return {'bootdev': bootdev}
+                return {'bootdev': bootdev, 'persistent': persistent}
             else:
-                return {'bootdev': bootnum}
+                return {'bootdev': bootnum, 'persistent': persistent}
 
     def set_power(self, powerstate, wait=False):
         """Request power state change
@@ -235,7 +238,7 @@ class Command(object):
         """
         if bootdev not in boot_devices:
             return {'error': "Unknown bootdevice %s requested" % bootdev}
-        bootdev = boot_devices[bootdev]
+        bootdevnum = boot_devices[bootdev]
         # first, we disable timer by way of set system boot options,
         # then move on to set chassis capabilities
         # Set System Boot Options is netfn=0, command=8, data
@@ -247,9 +250,9 @@ class Command(object):
             bootflags |= 1 << 5
         if persist:
             bootflags |= 1 << 6
-        if bootdev == 0:
+        if bootdevnum == 0:
             bootflags = 0
-        data = (5, bootflags, bootdev, 0, 0, 0)
+        data = (5, bootflags, bootdevnum, 0, 0, 0)
         response = self.raw_command(netfn=0, command=8, data=data)
         if 'error' in response:
             return response

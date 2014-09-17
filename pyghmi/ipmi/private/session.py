@@ -27,6 +27,7 @@ import select
 import socket
 import struct
 import threading
+import traceback
 
 from Crypto.Cipher import AES
 
@@ -46,6 +47,8 @@ iothread = None  # the thread in which all IO will be performed
                  # the nature of things.
 iothreadready = False  # whether io thread is yet ready to work
 iothreadwaiters = []  # threads waiting for iothreadready
+ignoresockets = set()  # between 'select' firing and 'recvfrom', a socket
+                       # should be ignored
 ioqueue = collections.deque([])
 selectbreak = None
 selectdeadline = 0
@@ -72,7 +75,13 @@ def _ioworker():
         if timeout < 0:
             timeout = 0
         selectdeadline = _monotonic_time() + timeout
-        mysockets = iosockets + [selectbreak[0]]
+        if ignoresockets:
+            mysockets = [selectbreak[0]]
+            for pendingsocket in iosockets:
+                if pendingsocket not in ignoresockets:
+                    mysockets.append(pendingsocket)
+        else:
+            mysockets = iosockets + [selectbreak[0]]
         tmplist, _, _ = select.select(mysockets, (), (), timeout)
         # pessimistically move out the deadline
         # doing it this early (before ioqueue is evaluated)
@@ -90,6 +99,7 @@ def _ioworker():
                     # was the endgame
                     pass
             else:
+                ignoresockets.add(handle)
                 rdylist.append(handle)
         for w in iowaiters:
             w[2].append(tuple(rdylist))
@@ -100,10 +110,16 @@ def _ioworker():
             workitem = ioqueue.popleft()
             # structure is function, args, list to append to ,event to set
             if isinstance(workitem[1], tuple):  # positional arguments
-                workitem[2].append(workitem[0](*workitem[1]))
+                try:
+                    workitem[2].append(workitem[0](*workitem[1]))
+                except Exception:
+                    traceback.print_exc()
                 workitem[3].set()
             elif isinstance(workitem[1], dict):
-                workitem[2].append(workitem[0](**workitem[1]))
+                try:
+                    workitem[2].append(workitem[0](**workitem[1]))
+                except Exception:
+                    traceback.print_exc()
                 workitem[3].set()
             elif workitem[0] == 'wait':
                 if len(rdylist) > 0:
@@ -130,11 +146,15 @@ def _io_apply(function, args):
 def _io_sendto(mysocket, packet, sockaddr):
     #Want sendto to act reasonably sane..
     mysocket.setblocking(1)
-    mysocket.sendto(packet, sockaddr)
+    try:
+        mysocket.sendto(packet, sockaddr)
+    except Exception:
+        pass
 
 
 def _io_recvfrom(mysocket, size):
     mysocket.setblocking(0)
+    ignoresockets.discard(mysocket)
     try:
         return mysocket.recvfrom(size)
     except socket.error:
@@ -153,9 +173,10 @@ def _monotonic_time():
     return os.times()[4]
 
 
-def _poller(readhandles, timeout=0):
-    rdylist = _io_apply('wait', timeout + _monotonic_time())
-    return rdylist
+def _poller(timeout=0):
+    if ignoresockets:
+        return True
+    return _io_apply('wait', timeout + _monotonic_time())
 
 
 def _aespad(data):
@@ -276,6 +297,7 @@ class Session(object):
         tmpsocket = _io_apply(socket.socket,
                               (socket.AF_INET6, socket.SOCK_DGRAM))  # INET6
                                     # can do IPv4 if you are nice to it
+        tmpsocket.setsockopt(socket.IPPROTO_IPV6, socket.IPV6_V6ONLY, 0)
         self.socketpool[tmpsocket] = 1
         iosockets.append(tmpsocket)
         return tmpsocket
@@ -333,6 +355,7 @@ class Session(object):
         self.privlevel = 4
         self.maxtimeout = 3  # be aggressive about giving up on initial packet
         self.incommand = False
+        self.nameonly = 16  # default to name only lookups in RAKP exchange
         self.initialized = True
         self.cleaningup = False
         self.lastpayload = None
@@ -377,8 +400,10 @@ class Session(object):
         # since our connection has failed retries
         # deregister our keepalive facility
         Session.keepalive_sessions.pop(self, None)
+        Session.waiting_sessions.pop(self, None)
         if self.logged:
             self.logged = 0  # mark session as busted
+            self._customkeepalives = None
             if not self.broken:
                 self.socketpool[self.socket] -= 1
                 self.broken = True
@@ -390,6 +415,9 @@ class Session(object):
                         del Session.bmc_handlers[sockaddr]
                 if self.sol_handler:
                     self.sol_handler({'error': 'Session Disconnected'})
+        elif not self.broken:
+            self.broken = True
+            self.socketpool[self.socket] -= 1
 
     def onlogon(self, parameter):
         if 'error' in parameter:
@@ -553,9 +581,11 @@ class Session(object):
         #of only the constructor needing a callback.  From then on,
         #synchronous usage of the class acts in a greenthread style governed by
         #order of data on the network
-        while self.lastresponse is None:
+        while retry and self.lastresponse is None:
             Session.wait_for_rsp(timeout=timeout)
-        return self.lastresponse
+        lastresponse = self.lastresponse
+        self.incommand = False
+        return lastresponse
 
     def _send_ipmi_net_payload(self, netfn, command, data, bridge_request=None,
                                retry=True, delay_xmit=None):
@@ -668,7 +698,8 @@ class Session(object):
         self.netpacket = struct.pack("!%dB" % len(message), *message)
         #advance idle timer since we don't need keepalive while sending packets
         #out naturally
-        if self in Session.keepalive_sessions and not needskeepalive:
+        if (self in Session.keepalive_sessions and not needskeepalive and
+                not self._customkeepalives):
             Session.keepalive_sessions[self]['timeout'] = _monotonic_time() + \
                 25 + (random.random() * 4.9)
         self._xmit_packet(retry, delay_xmit=delay_xmit)
@@ -765,12 +796,21 @@ class Session(object):
                                     data=[self.privlevel])
 
     def _got_priv_level(self, response):
-        mysuffix = " while requesting privelege level %d for %s" % (
-            self.privlevel, self.userid)
-        errstr = get_ipmi_error(response, suffix=mysuffix)
-        if errstr:
-            self.onlogon({'error': errstr})
-            return
+        if response['code']:
+            if response['code'] in (0x80, 0x81) and self.privlevel == 4:
+                # some implementations will let us get this far,
+                # but suddenly get skiddish.  Try again in such a case
+                self.privlevel = 3
+                self.logged = 1
+                self.logout()
+                self._relog()
+                return
+            mysuffix = " while requesting privelege level %d for %s" % (
+                self.privlevel, self.userid)
+            errstr = get_ipmi_error(response, suffix=mysuffix)
+            if errstr:
+                self.onlogon({'error': errstr})
+                return
         self.logged = 1
         Session.keepalive_sessions[self] = {}
         Session.keepalive_sessions[self]['ipmisession'] = self
@@ -894,28 +934,21 @@ class Session(object):
                 timeout = 0
         if timeout is None:
             return 0
-        if selectbreak is None:
-            mysockets = iosockets
-        else:
-            mysockets = [iosockets + [selectbreak[0]]]
-        rdylist = _poller(mysockets, timeout=timeout)
-        if len(rdylist) > 0:
-            while _poller(iosockets):  # if the somewhat lengthy
-                        # queue # processing takes long enough for packets to
-                        # come in, be eager
-                mysockets = _poller(iosockets)
-                pktqueue = collections.deque([])
-                cls.pulltoqueue(mysockets, pktqueue)
-                while len(pktqueue):
-                    (data, sockaddr) = pktqueue.popleft()
-                    cls._route_ipmiresponse(sockaddr, data)
-                    cls.pulltoqueue(mysockets, pktqueue)
+        if _poller(timeout=timeout):
+            pktqueue = collections.deque([])
+            cls.pulltoqueue(iosockets, pktqueue)
+            while len(pktqueue):
+                (data, sockaddr) = pktqueue.popleft()
+                cls._route_ipmiresponse(sockaddr, data)
+                cls.pulltoqueue(iosockets, pktqueue)
         sessionstodel = []
         sessionstokeepalive = []
         for session, parms in cls.keepalive_sessions.iteritems():
-            if parms['timeout'] < curtime:
-                cls.keepalive_sessions[session]['timeout'] = 25 + \
-                    (random.random() * 4.9)
+            # if the session is busy inside a command, defer invoking keepalive
+            # until incommand is no longer the case
+            if parms['timeout'] < curtime and not session.incommand:
+                cls.keepalive_sessions[session]['timeout'] = \
+                    _monotonic_time() + 25 + (random.random() * 4.9)
                 sessionstokeepalive.append(session)
         for session in sessionstokeepalive:
             session._keepalive()
@@ -955,6 +988,8 @@ class Session(object):
         return regid
 
     def unregister_keepalive(self, regid):
+        if self._customkeepalives is None:
+            return
         try:
             del self._customkeepalives[regid]
         except KeyError:
@@ -1054,6 +1089,8 @@ class Session(object):
             if data[5] & 0b10000000:
                 encrypted = 1
             authcode = rawdata[-12:]
+            if self.k1 is None:  # we are in no shape to process a packet now
+                return
             expectedauthcode = hmac.new(
                 self.k1, rawdata[4:-12], hashlib.sha1).digest()[:12]
             if authcode != expectedauthcode:
@@ -1135,7 +1172,7 @@ class Session(object):
             list(struct.unpack("4B",
                  struct.pack("<I", self.pendingsessionid))) +\
             list(struct.unpack("16B", self.randombytes)) +\
-            [self.privlevel, 0, 0] +\
+            [self.nameonly | self.privlevel, 0, 0] +\
             [userlen] +\
             list(struct.unpack("%dB" % userlen, self.userid))
         self.sessioncontext = "EXPECTINGRAKP2"
@@ -1150,7 +1187,7 @@ class Session(object):
         if data[0] != self.rmcptag:  # ignore mismatched tags for retry logic
             return -9
         if data[1] != 0:  # if not successful, consider next move
-            if data[1] == 9 and self.privlevel == 4:
+            if data[1] in (9, 0xd) and self.privlevel == 4:
                 # Here the situation is likely that the peer didn't want
                 # us to use Operator.  Degrade to operator and try again
                 self.privlevel = 3
@@ -1173,7 +1210,7 @@ class Session(object):
         userlen = len(self.userid)
         hmacdata = struct.pack("<II", localsid, self.pendingsessionid) +\
             self.randombytes + self.remoterandombytes + self.remoteguid +\
-            struct.pack("2B", self.privlevel, userlen) +\
+            struct.pack("2B", self.nameonly | self.privlevel, userlen) +\
             self.userid
         expectedhash = hmac.new(self.password, hmacdata, hashlib.sha1).digest()
         givenhash = struct.pack("%dB" % len(data[40:]), *data[40:])
@@ -1185,7 +1222,8 @@ class Session(object):
         # to store the keys
         self.sik = hmac.new(self.kg,
                             self.randombytes + self.remoterandombytes +
-                            struct.pack("2B", self.privlevel, userlen) +
+                            struct.pack("2B", self.nameonly | self.privlevel,
+                                        userlen) +
                             self.userid, hashlib.sha1).digest()
         self.k1 = hmac.new(self.sik, '\x01' * 20, hashlib.sha1).digest()
         self.k2 = hmac.new(self.sik, '\x02' * 20, hashlib.sha1).digest()
@@ -1201,7 +1239,8 @@ class Session(object):
             list(struct.unpack("4B", struct.pack("<I", self.pendingsessionid)))
         hmacdata = self.remoterandombytes +\
             struct.pack("<I", self.localsid) +\
-            struct.pack("2B", self.privlevel, len(self.userid)) +\
+            struct.pack("2B", self.nameonly | self.privlevel,
+                        len(self.userid)) +\
             self.userid
         authcode = hmac.new(self.password, hmacdata, hashlib.sha1).digest()
         payload += list(struct.unpack("%dB" % len(authcode), authcode))
@@ -1313,7 +1352,6 @@ class Session(object):
             self.send_payload(payload=nextpayload,
                               payload_type=nextpayloadtype,
                               retry=retry)
-        self.incommand = False
         self.ipmicallback(response)
 
     def _timedout(self):
@@ -1324,7 +1362,6 @@ class Session(object):
         if self.timeout > self.maxtimeout:
             response = {'error': 'timeout'}
             self.ipmicallback(response)
-            self.incommand = False
             self.nowait = False
             self._mark_broken()
             return
@@ -1335,12 +1372,14 @@ class Session(object):
             # In this case, we want to craft a new session request to have
             # unambiguous session id regardless of how packet was dropped or
             # delayed in this case, it's safe to just redo the request
+            self.lastpayload = None
             self._open_rmcpplus_request()
         elif (self.sessioncontext == 'EXPECTINGRAKP2' or
               self.sessioncontext == 'EXPECTINGRAKP4'):
             # If we can't be sure which RAKP was dropped or if RAKP3/4 was just
             # delayed, the most reliable thing to do is rewind and start over
             # bmcs do not take kindly to receiving RAKP1 or RAKP3 twice
+            self.lastpayload = None
             self._relog()
         else:  # in IPMI case, the only recourse is to act as if the packet is
               # idempotent.  SOL has more sophisticated retry handling
@@ -1410,6 +1449,7 @@ class Session(object):
         # stop trying for a keepalive,
         Session.keepalive_sessions.pop(self, None)
         self.logged = 0
+        self._customkeepalives = None
         self.nowait = False
         self.socketpool[self.socket] -= 1
         return {'success': True}

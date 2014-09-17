@@ -42,6 +42,7 @@ class Console(object):
     def __init__(self, bmc, userid, password,
                  iohandler, port=623,
                  force=False, kg=None):
+        self.keepaliveid = None
         self.connected = False
         self.broken = False
         self.out_handler = iohandler
@@ -115,6 +116,7 @@ class Console(object):
                 return
         if 'error' in response:
             self._print_error(response['error'])
+            return
         self.activated = True
         #data[0:3] is reserved except for the test mode, which we don't use
         data = response['data']
@@ -180,8 +182,13 @@ class Console(object):
         """
         self.ipmi_session.unregister_keepalive(self.keepaliveid)
         if self.activated:
-            self.ipmi_session.raw_command(netfn=6, command=0x49,
-                                          data=(1, 1, 0, 0, 0, 0))
+            try:
+                self.ipmi_session.raw_command(netfn=6, command=0x49,
+                                              data=(1, 1, 0, 0, 0, 0))
+            except exc.IpmiException:
+                # if underlying ipmi session is not working, then
+                # run with the implicit success
+                pass
 
     def send_data(self, data):
         if self.broken:
