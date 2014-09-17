@@ -2,6 +2,7 @@ python-pyghmi (0.6.17-1) experimental; urgency=medium
 
   * New upstream release.
   * Uploading to experimental just before the Jessie freeze.
+  * Fixed python-sphinx should be in build-depends and not -indep.
 
  -- Thomas Goirand <zigo@debian.org>  Wed, 17 Sep 2014 16:08:35 +0800
 
