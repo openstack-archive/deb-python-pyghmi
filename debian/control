@@ -17,7 +17,7 @@ Build-Depends-Indep: python-coverage,
                      python-testtools,
                      subunit,
                      testrepository,
-Standards-Version: 3.9.5
+Standards-Version: 3.9.6
 Vcs-Browser: http://anonscm.debian.org/gitweb/?p=openstack/python-pyghmi.git
 Vcs-Git: git://anonscm.debian.org/openstack/python-pyghmi.git
 Homepage: https://github.com/stackforge/pyghmi

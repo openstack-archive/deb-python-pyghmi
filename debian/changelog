@@ -2,6 +2,7 @@ python-pyghmi (0.6.17-2) unstable; urgency=medium
 
   * Uploading to unstable.
   * Fixed (build-)depends for Jessie.
+  * Standards-Version: 3.9.6 (no change).
 
  -- Thomas Goirand <zigo@debian.org>  Fri, 01 May 2015 11:57:23 +0000
 
