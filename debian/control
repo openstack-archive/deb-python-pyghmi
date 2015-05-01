@@ -2,23 +2,21 @@ Source: python-pyghmi
 Section: python
 Priority: optional
 Maintainer: PKG OpenStack <openstack-devel@lists.alioth.debian.org>
-Uploaders: Julien Danjou <acid@debian.org>,
-           Thomas Goirand <zigo@debian.org>,
-           Mehdi Abaakouk <sileht@sileht.net>
+Uploaders: Thomas Goirand <zigo@debian.org>,
 Build-Depends: debhelper (>= 9),
                openstack-pkg-tools,
-               python-all (>= 2.6.6-3~),
+               python-all,
                python-pbr,
                python-setuptools,
                python-sphinx,
 Build-Depends-Indep: python-coverage,
                      python-crypto,
-                     python-fixtures (>= 0.3.14),
-                     python-subunit,
+                     python-fixtures,
+                     python-hacking,
                      python-testscenarios,
-                     python-testtools (>= 0.9.32),
+                     python-testtools,
                      subunit,
-                     testrepository (>=0.0.17)
+                     testrepository,
 Standards-Version: 3.9.5
 Vcs-Browser: http://anonscm.debian.org/gitweb/?p=openstack/python-pyghmi.git
 Vcs-Git: git://anonscm.debian.org/openstack/python-pyghmi.git
@@ -30,7 +28,7 @@ Pre-Depends: dpkg (>= 1.15.6~)
 Depends: python-crypto,
          python-pbr,
          ${misc:Depends},
-         ${python:Depends}
+         ${python:Depends},
 Recommends: ${python:Recommends}
 Description: General Hardware Management Initiative (IPMI and others)
  This is a pure Python implementation of IPMI protocol. ipmictl.py is a sample

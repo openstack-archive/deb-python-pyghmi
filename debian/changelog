@@ -1,3 +1,10 @@
+python-pyghmi (0.6.17-2) unstable; urgency=medium
+
+  * Uploading to unstable.
+  * Fixed (build-)depends for Jessie.
+
+ -- Thomas Goirand <zigo@debian.org>  Fri, 01 May 2015 11:57:23 +0000
+
 python-pyghmi (0.6.17-1) experimental; urgency=medium
 
   * New upstream release.
