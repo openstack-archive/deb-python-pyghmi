@@ -1,3 +1,9 @@
+python-pyghmi (0.8.0-1) unstable; urgency=medium
+
+  * New upstream release.
+
+ -- Thomas Goirand <zigo@debian.org>  Tue, 20 Oct 2015 23:04:31 +0200
+
 python-pyghmi (0.6.17-2) unstable; urgency=medium
 
   * Uploading to unstable.
