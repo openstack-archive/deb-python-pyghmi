@@ -2,6 +2,7 @@
 # coding=utf8
 
 # Copyright 2014 IBM Corporation
+# Copyright 2015 Lenovo
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -269,9 +270,6 @@ class SDREntry(object):
             self.sdrtype = TYPE_UNKNOWN   # assume undefined
             self.oem_decode(entrybytes[5:])
         elif self.reportunsupported:
-            #will remove once I see it stop being thrown for now
-            #perhaps need some explicit mode to check for
-            #unsupported things, but make do otherwise
             raise NotImplementedError
         else:
             self.sdrtype = TYPE_UNKNOWN
@@ -301,6 +299,9 @@ class SDREntry(object):
         self.sdrtype = TYPE_FRU
         self.fru_name = self.tlv_decode(entry[10], entry[11:])
         self.fru_number = entry[1]
+        self.fru_logical = (entry[2] & 0b10000000) == 0b10000000
+        # 0x8  to 0x10..  0 unspecified except on 0x10, 1 is dimm
+        self.fru_type_and_modifier = (entry[5] << 8) + entry[6]
 
     def association_decode(self, entry):
         # table 43-4 Entity Associaition Record
@@ -317,7 +318,8 @@ class SDREntry(object):
         # this function handles the common aspects of compact and full
         # offsets from spec, minus 6
         self.sensor_number = entry[2]
-        self.entity = ipmiconst.entity_ids[entry[3]]
+        self.entity = ipmiconst.entity_ids.get(
+            entry[3], 'Unknown entity {0}'.format(entry[3]))
         self.sensor_type_number = entry[7]
         try:
             self.sensor_type = ipmiconst.sensor_type_codes[entry[7]]
@@ -377,7 +379,7 @@ class SDREntry(object):
             self.decode_formula(entry[19:25])
 
     def _decode_state(self, state):
-        mapping = ipmiconst.discrete_type_offsets
+        mapping = ipmiconst.generic_type_offsets
         try:
             if self.reading_type in mapping:
                 desc = mapping[self.reading_type][state]['desc']
@@ -677,12 +679,12 @@ class SDR(object):
         if newent.sdrtype == TYPE_SENSOR:
             id = newent.sensor_number
             if id in self.sensors:
-                raise exc.BmcErrorException("Duplicate sensor number " + id)
+                raise exc.BmcErrorException("Duplicate sensor number %d" % id)
             self.sensors[id] = newent
         elif newent.sdrtype == TYPE_FRU:
             id = newent.fru_number
             if id in self.fru:
-                raise exc.BmcErrorException("Duplicate FRU identifier " + id)
+                raise exc.BmcErrorException("Duplicate FRU identifier %d" % id)
             self.fru[id] = newent
 
     def decode_aux(self, auxdata):
