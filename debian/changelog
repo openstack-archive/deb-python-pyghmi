@@ -1,4 +1,4 @@
-python-pyghmi (0.8.0-2) UNRELEASED; urgency=medium
+python-pyghmi (0.8.0-2) unstable; urgency=medium
 
   * Fixed VCS URLs (https).
   * d/rules: Changed UPSTREAM_GIT to new URL
